@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SYZOJ 提交监视器</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>SYZOJ 提交监视器</h1>
+
+  <label for="username">钦定用户</label>
+  <input id="username" type="text" placeholder="输入目标用户名" autocomplete="off" spellcheck="false">
+
+  <div class="current">当前：<span id="current-user">未设置</span></div>
+
+  <div class="actions">
+    <button id="save" type="button">保存</button>
+  </div>
+
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
