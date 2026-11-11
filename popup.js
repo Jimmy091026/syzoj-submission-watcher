@@ -27,24 +27,41 @@ function setStatus(text, isError) {
   statusEl.className = isError ? 'error' : '';
 }
 
-// 初始化：读取当前用户名
+// 解析输入：换行 / 逗号（中英文）/ 空格分隔，去重、去空白
+function parseUsernames(text) {
+  const parts = String(text || '').split(/[\s,，]+/).filter((s) => s.length > 0);
+  return Array.from(new Set(parts));
+}
+
+// 更新「当前」摘要
+function renderCurrent(names) {
+  if (!names || names.length === 0) {
+    currentUserEl.textContent = '未设置';
+    return;
+  }
+  currentUserEl.textContent = names.length + ' 人：' + names.join('、');
+}
+
+// 初始化：读取当前用户列表
 async function init() {
   const state = await sendToBackground({ type: 'GET_STATE' });
-  const name = state && state.username ? state.username : '';
-  input.value = name;
-  currentUserEl.textContent = name || '未设置';
+  const names = state && Array.isArray(state.usernames) ? state.usernames : [];
+  input.value = names.join('\n');
+  renderCurrent(names);
 }
 
 async function save() {
-  const name = input.value.trim();
-  if (!name) {
-    setStatus('请输入用户名', true);
+  const names = parseUsernames(input.value);
+  if (names.length === 0) {
+    setStatus('请输入至少一个用户名', true);
     input.focus();
     return;
   }
-  const res = await sendToBackground({ type: 'SET_USERNAME', username: name });
+  const res = await sendToBackground({ type: 'SET_USERNAMES', usernames: names });
   if (res && res.ok) {
-    currentUserEl.textContent = name;
+    // 回显为「每行一个」的规范格式
+    input.value = names.join('\n');
+    renderCurrent(names);
     setStatus('已保存，面板已刷新', false);
   } else {
     setStatus((res && res.error) || '保存失败', true);
@@ -53,7 +70,11 @@ async function save() {
 
 saveBtn.addEventListener('click', save);
 input.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') save();
+  // Ctrl/Cmd + Enter 保存（textarea 内 Enter 用于换行）
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    save();
+  }
 });
 
 init();

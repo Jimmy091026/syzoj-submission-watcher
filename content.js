@@ -14,10 +14,11 @@
   const Z_INDEX = 2147483000;
 
   // ---- 运行时状态 ----
-  let username = '';
-  let firstPageItems = [];   // 第一页（最新一页），轮询会刷新
-  let firstNextQuery = null; // 第一页的「下一页」query
-  let morePages = [];        // [{ query, items, nextQuery }, ...] 加载更多的历史页
+  // users: Map<name, { firstItems, firstNextQuery, morePages }>
+  //   firstItems   = 第一页（最新一页），轮询会刷新
+  //   firstNextQuery = 第一页的「下一页」query
+  //   morePages    = [{ query, items, nextQuery }, ...] 加载更多的历史页
+  let users = new Map();
   let lastUpdateTime = null;
   let loadingMore = false;
 
@@ -70,15 +71,15 @@
 
     // 同步注册消息监听与轮询，避免错过 background 的推送
     chrome.runtime.onMessage.addListener((msg) => {
-      if (msg && msg.type === 'USER_CHANGED') {
-        setUsername(msg.username || '');
+      if (msg && msg.type === 'USERS_CHANGED') {
+        setUsernames(msg.usernames || []);
         resetPages();
-        if (username) pollRefresh(true);
-        else showEmpty('请先点击扩展图标设置用户名');
+        if (users.size > 0) pollRefresh(true);
+        else showEmpty('请先点击扩展图标设置用户');
       }
     });
     setInterval(() => {
-      if (username) pollRefresh(false);
+      if (users.size > 0) pollRefresh(false);
     }, POLL_INTERVAL_MS);
 
     // 异步加载初始状态
@@ -87,24 +88,36 @@
       applyPosition(pos);
 
       const state = await sendToBackground({ type: 'GET_STATE' });
-      if (state && state.username) {
-        setUsername(state.username);
+      if (state && state.usernames && state.usernames.length) {
+        setUsernames(state.usernames);
         await pollRefresh(true);
       } else {
-        showEmpty('请先点击扩展图标设置用户名');
+        showEmpty('请先点击扩展图标设置用户');
       }
     })();
   }
 
-  function setUsername(name) {
-    username = name;
-    if (userEl) userEl.textContent = name || '-';
+  function setUsernames(names) {
+    users = new Map();
+    for (const name of names) {
+      users.set(name, {
+        firstItems: [],
+        firstNextQuery: null,
+        morePages: []
+      });
+    }
+    if (userEl) {
+      userEl.textContent = names.join('、') || '-';
+      userEl.title = names.join('、') || '';
+    }
   }
 
   function resetPages() {
-    firstPageItems = [];
-    firstNextQuery = null;
-    morePages = [];
+    for (const u of users.values()) {
+      u.firstItems = [];
+      u.firstNextQuery = null;
+      u.morePages = [];
+    }
     lastUpdateTime = null;
   }
 
@@ -127,38 +140,60 @@
     });
   }
 
-  // 轮询：只刷新第一页（最新页，状态变化都发生在这里）
+  // 轮询：只刷新各用户第一页（最新页，状态变化都发生在这里）
   async function pollRefresh(isInitial) {
-    const res = await sendToBackground({ type: 'FETCH', username });
+    const names = Array.from(users.keys());
+    const res = await sendToBackground({ type: 'FETCH_ALL', usernames: names });
 
-    if (res && res.ok) {
-      firstPageItems = res.items || [];
-      firstNextQuery = res.nextQuery || null;
+    if (res && res.ok && Array.isArray(res.results)) {
+      let gotAny = false;
+      for (const r of res.results) {
+        const u = users.get(r.username);
+        if (!u) continue;
+        if (r.ok) {
+          u.firstItems = r.items || [];
+          u.firstNextQuery = r.nextQuery || null;
+          gotAny = true;
+        }
+        // 单个用户失败：保留旧数据，下轮重试
+      }
       lastUpdateTime = new Date();
       render();
-      return;
+      if (gotAny) return;
     }
-    // 失败处理：无任何数据时显示错误；已有数据时静默，下轮继续重试
-    if (firstPageItems.length === 0 && morePages.length === 0) {
+    // 全部失败：无任何数据时显示错误；已有数据时静默，下轮继续重试
+    if (totalItems() === 0) {
       showError((res && res.error) || '请求失败');
     }
   }
 
-  // 加载更多：用上一页返回的「下一页」query 拉取（兼容普通/快速分页）
+  // 统计当前已加载的总条数
+  function totalItems() {
+    let n = 0;
+    for (const u of users.values()) {
+      n += u.firstItems.length + u.morePages.reduce((s, p) => s + p.items.length, 0);
+    }
+    return n;
+  }
+
+  // 加载更多：找到「最旧一条记录所属、且还有下一页」的用户，加载其下一页
   async function onLoadMore() {
     if (loadingMore) return;
-    const query = morePages.length === 0
-      ? firstNextQuery
-      : morePages[morePages.length - 1].nextQuery;
-    if (!query) { render(); return; }
+
+    const target = pickUserForLoadMore();
+    if (!target) { render(); return; }
 
     loadingMore = true;
     moreBtn.textContent = '加载中…';
     moreBtn.disabled = true;
 
-    const res = await sendToBackground({ type: 'FETCH', username, query });
+    const query = target.user.morePages.length === 0
+      ? target.user.firstNextQuery
+      : target.user.morePages[target.user.morePages.length - 1].nextQuery;
+
+    const res = await sendToBackground({ type: 'FETCH_MORE', username: target.name, query });
     if (res && res.ok) {
-      morePages.push({
+      target.user.morePages.push({
         query,
         items: res.items || [],
         nextQuery: res.nextQuery || null
@@ -172,12 +207,41 @@
     moreBtn.disabled = false;
   }
 
+  // 选「加载更多」目标用户：
+  // 从所有已加载记录中，按 submissionId 升序（最旧优先）逐个尝试，返回第一个还有下一页的用户。
+  function pickUserForLoadMore() {
+    // 收集 (submissionId, name) 并按 id 升序
+    const entries = [];
+    for (const [name, u] of users.entries()) {
+      const all = u.firstItems.concat(...u.morePages.map((p) => p.items));
+      for (const it of all) {
+        const id = it && it.info && it.info.submissionId;
+        if (id != null) entries.push({ id, name });
+      }
+    }
+    entries.sort((a, b) => a.id - b.id);
+
+    // 处理 id 重复（快速分页下同一用户可能跨页重叠）：仍按序尝试
+    const tried = new Set();
+    for (const e of entries) {
+      if (tried.has(e.name)) continue;
+      tried.add(e.name);
+      const u = users.get(e.name);
+      if (!u) continue;
+      const nextQuery = u.morePages.length === 0
+        ? u.firstNextQuery
+        : u.morePages[u.morePages.length - 1].nextQuery;
+      if (nextQuery) return { name: e.name, user: u };
+    }
+    return null;
+  }
+
   // ============================================================
   // 4. 渲染
   // ============================================================
   function render() {
     if (timeEl) timeEl.textContent = formatTime(lastUpdateTime);
-    const all = dedupeById(firstPageItems.concat(...morePages.map((p) => p.items)));
+    const all = collectAllItems();
     if (countEl) countEl.textContent = '共 ' + all.length + ' 条';
 
     listEl.textContent = '';
@@ -185,10 +249,26 @@
     for (const item of all) frag.appendChild(renderRow(item));
     listEl.appendChild(frag);
 
-    const canLoadMore = morePages.length === 0
-      ? !!firstNextQuery
-      : !!morePages[morePages.length - 1].nextQuery;
-    footerEl.style.display = canLoadMore ? 'block' : 'none';
+    footerEl.style.display = pickUserForLoadMore() ? 'block' : 'none';
+  }
+
+  // 合并所有用户的全部已加载记录，按 submissionId 降序去重
+  function collectAllItems() {
+    const all = [];
+    for (const u of users.values()) {
+      all.push(...u.firstItems);
+      for (const p of u.morePages) all.push(...p.items);
+    }
+    const deduped = dedupeById(all);
+    deduped.sort((a, b) => {
+      const ida = a && a.info && a.info.submissionId;
+      const idb = b && b.info && b.info.submissionId;
+      if (ida == null && idb == null) return 0;
+      if (ida == null) return 1;
+      if (idb == null) return -1;
+      return idb - ida;
+    });
+    return deduped;
   }
 
   function renderRow(item) {
@@ -197,7 +277,8 @@
 
     const status = result ? result.result : (item && item.running ? 'Judging' : 'Waiting');
     const score = (result && result.score != null && result.score !== '') ? result.score : '-';
-    const user = info.user || '-';
+    // 提交人：优先显示用户名 uid（如 jimmy0926），回退到学号 user（如 2024005023）
+    const user = String(info.uid || info.user || '').trim() || '-';
     const problemId = (info.problemId != null && info.problemId !== '') ? info.problemId : '';
     const problemName = info.problemName || info.problemTitle || '';
     const shortName = truncateName(problemName, 5);
@@ -410,7 +491,7 @@
     #ojp-panel {
       position: fixed;
       z-index: 2147483000;
-      width: 360px;
+      width: 420px;
       max-width: calc(100vw - 24px);
       background: #ffffff;
       border: 1px solid #e5e7eb;
@@ -435,9 +516,14 @@
       -webkit-user-select: none;
     }
     #ojp-header:active { cursor: grabbing; }
-    .ojp-at { color: #6b7280; font-size: 12px; }
-    #ojp-username { color: #2563eb; font-weight: 600; }
-    .ojp-hr { display: flex; align-items: center; gap: 8px; color: #9ca3af; font-size: 11px; }
+    .ojp-at { color: #6b7280; font-size: 12px; min-width: 0; overflow: hidden; white-space: nowrap; }
+    #ojp-username {
+      color: #2563eb; font-weight: 600;
+      display: inline-block; max-width: 160px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      vertical-align: bottom;
+    }
+    .ojp-hr { display: flex; align-items: center; gap: 8px; color: #9ca3af; font-size: 11px; flex-shrink: 0; }
     #ojp-toggle {
       border: none; background: transparent; cursor: pointer;
       color: #6b7280; font-size: 12px; line-height: 1; padding: 2px 5px;
@@ -448,7 +534,7 @@
     #ojp-list { padding: 2px 0; }
     .ojp-row {
       display: grid;
-      grid-template-columns: 100px 36px 60px 1fr;
+      grid-template-columns: 96px 34px 100px 1fr;
       gap: 6px;
       align-items: center;
       padding: 5px 10px;

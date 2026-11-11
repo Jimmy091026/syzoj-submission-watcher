@@ -25,18 +25,26 @@ label {
   font-size: 12px;
 }
 
-input {
+input,
+textarea {
   width: 100%;
   padding: 8px 10px;
   border: 1px solid #d1d5db;
   border-radius: 6px;
   font-size: 13px;
   outline: none;
+  font-family: inherit;
 }
 
-input:focus {
+input:focus,
+textarea:focus {
   border-color: #2563eb;
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+textarea {
+  resize: vertical;
+  line-height: 1.5;
 }
 
 .current {

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "SYZOJ 提交监视器",
   "version": "1.0.0",
-  "description": "在任意网页悬浮展示目标 SYZOJ OJ 指定用户的实时提交（状态 / 得分 / 提交人 / 题目）。",
+  "description": "在任意网页悬浮展示目标 SYZOJ OJ 指定（多个）用户的实时提交（状态 / 得分 / 提交人 / 题目）。",
   "permissions": ["storage"],
   "host_permissions": [
     "https://in.7fa4.cn:8888/*",

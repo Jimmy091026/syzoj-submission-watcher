@@ -26,43 +26,91 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 async function handleMessage(msg) {
   switch (msg && msg.type) {
-    case 'SET_USERNAME':
-      return setUsername(msg.username);
+    case 'SET_USERNAMES':
+      return setUsernames(msg.usernames);
     case 'GET_STATE':
       return getState();
-    case 'FETCH':
+    case 'FETCH_ALL':
+      // 并行抓取所有用户的第一页（最新页）
+      return fetchAll(msg.usernames);
+    case 'FETCH_MORE':
       // query：加载更多时复用服务器生成的完整 query（含 page 或 currPageTop/currPageBottom）
-      return fetchSubmissions(msg.username, msg.query || null);
+      return fetchMore(msg.username, msg.query || null);
     default:
       return { ok: false, error: '未知消息类型: ' + (msg && msg.type) };
   }
 }
 
-// ---- 保存用户名，并通知所有已打开页面立即刷新 ----
-async function setUsername(username) {
-  const name = String(username || '').trim();
-  await chrome.storage.local.set({ username: name });
+// ---- 保存用户列表，并通知所有已打开页面立即刷新 ----
+async function setUsernames(usernames) {
+  const names = normalizeUsernames(usernames);
+  await chrome.storage.local.set({ usernames: names });
 
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
     if (tab.id != null) {
       try {
-        await chrome.tabs.sendMessage(tab.id, { type: 'USER_CHANGED', username: name });
+        await chrome.tabs.sendMessage(tab.id, { type: 'USERS_CHANGED', usernames: names });
       } catch (_) {
         // 该页面没有注入 content script（如 chrome:// 页），忽略
       }
     }
   }
-  return { ok: true, username: name };
+  return { ok: true, usernames: names };
 }
 
-// ---- 读取全局状态（用户名 / 面板位置 / 上次成功域名） ----
+// 规范化用户名列表：去空白、去空项、去重（保持顺序）
+function normalizeUsernames(usernames) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of (Array.isArray(usernames) ? usernames : [])) {
+    const name = String(raw || '').trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+// ---- 读取全局状态（用户列表 / 面板位置 / 上次成功域名） ----
 async function getState() {
-  const data = await chrome.storage.local.get(['username', 'position', 'lastGoodDomain']);
+  const data = await chrome.storage.local.get(['usernames', 'position', 'lastGoodDomain']);
   return {
-    username: data.username || '',
+    usernames: Array.isArray(data.usernames) ? data.usernames : [],
     position: data.position || null,
     lastGoodDomain: data.lastGoodDomain || null
+  };
+}
+
+// ---- 多人第一页并行抓取（单个用户失败不影响其他人） ----
+async function fetchAll(usernames) {
+  const names = normalizeUsernames(usernames);
+  const results = await Promise.all(names.map(async (name) => {
+    const res = await fetchSubmissions(name, null);
+    return {
+      username: name,
+      ok: res.ok,
+      error: res.error,
+      items: res.items,
+      nextQuery: res.nextQuery,
+      domain: res.domain
+    };
+  }));
+  return { ok: true, results };
+}
+
+// ---- 单个用户翻下一页 ----
+async function fetchMore(username, query) {
+  const name = String(username || '').trim();
+  if (!name) return { ok: false, error: '用户名未设置' };
+  const res = await fetchSubmissions(name, query);
+  return {
+    username: name,
+    ok: res.ok,
+    error: res.error,
+    items: res.items,
+    nextQuery: res.nextQuery,
+    domain: res.domain
   };
 }
 
